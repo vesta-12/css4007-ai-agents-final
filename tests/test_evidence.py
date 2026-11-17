@@ -96,6 +96,34 @@ class EvidenceTests(unittest.TestCase):
                 facts = {"spread_requirement": requirement, "spread_inputs": inputs}
                 self.assertEqual(evidence.review_status(facts, {"table": source}), expected)
 
+    def test_live_variant_regressions(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from check_spread_variants import run_variant
+
+        def reply(model, messages, response_format):
+            payload = json.loads(messages[1]["content"])
+            schema = response_format["json_schema"]["schema"]
+            ids = schema["properties"]["evidence"]["items"]["enum"]
+            self.assertEqual(set(ids), set(payload["passages"]))
+            self.assertNotIn("rubric.md:999", ids)
+            self.assertNotIn("next_action", schema["properties"])
+            criterion = [ref for ref in ids if ref.startswith("rubric.md:")
+                         and "расчёт спреда" in payload["passages"][ref].lower()]
+            refs = criterion or ["rubric.md:5"]
+            report = dict(spread_requirement="required" if criterion else "not_required",
+                          spread_inputs="insufficient", finding="Тест", impact="Тест",
+                          evidence=refs, next_action="Сгенерировать цены")
+            msg = Mock(content=json.dumps(report), refusal=None)
+            return Mock(choices=[Mock(message=msg, finish_reason="stop")])
+
+        client = Mock()
+        client.chat.completions.create.side_effect = reply
+        for variant in ("without_spread_criterion", "without_trade_register"):
+            with self.subTest(variant=variant):
+                result = run_variant(client, "test-model", variant)
+                self.assertTrue(all(result["checks"].values()), result)
+                self.assertNotIn("Сгенерировать", result["report"]["next_action"])
+
     def test_reference_outside_case(self):
         with self.assertRaises(ValueError):
             evidence.find_evidence(
